@@ -22,7 +22,7 @@ class ThreatResponse(BaseModel):
 class ThreatPatchRequest(BaseModel):
     """Schema for updating threat details."""
     severity: Optional[str] = Field(default=None, description="Updated severity (LOW, MEDIUM, HIGH, CRITICAL)")
-    status: Optional[str] = Field(default=None, description="Updated status (OPEN, ACKNOWLEDGED, RESOLVED)")
+    status: Optional[str] = Field(default=None, description="Updated status (NEW, ACKNOWLEDGED, INVESTIGATING, DISPATCHED, RESOLVED, FALSE_POSITIVE)")
     notes: Optional[str] = Field(default=None, description="Operator notes or operational updates")
 
 

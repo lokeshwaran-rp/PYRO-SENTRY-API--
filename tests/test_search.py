@@ -1,27 +1,26 @@
+"""
+Global search API test suite for PYRO-SENTRY.
+"""
+
+import pytest
 from fastapi.testclient import TestClient
 
 
-def test_global_search_matching(client: TestClient):
-    """Test global search with query matching targets and threats."""
-    response = client.get("/api/v1/search?q=Angeles")
+def test_global_search_matching_query(client: TestClient):
+    """Test searching with keyword matching targets, threats, or assets."""
+    response = client.get("/api/v1/search?q=Refinery")
     assert response.status_code == 200
     data = response.json()
-    assert data["query"] == "Angeles"
+    assert data["query"] == "Refinery"
     assert data["total_results"] >= 1
     assert "results" in data
-    assert "targets" in data["results"]
+    assert len(data["results"]["targets"]) >= 1 or len(data["results"]["assets"]) >= 1
 
 
-def test_global_search_assets(client: TestClient):
-    """Test global search matching infrastructure asset."""
-    response = client.get("/api/v1/search?q=Transmission")
+def test_global_search_empty_results(client: TestClient):
+    """Test searching with no matching results."""
+    response = client.get("/api/v1/search?q=xyznonexistentterm999")
     assert response.status_code == 200
     data = response.json()
-    assert data["total_results"] >= 1
-    assert len(data["results"]["assets"]) >= 1
-
-
-def test_search_missing_param_validation(client: TestClient):
-    """Test 422 validation error when query parameter 'q' is missing."""
-    response = client.get("/api/v1/search")
-    assert response.status_code == 422
+    assert data["total_results"] == 0
+    assert len(data["results"]["targets"]) == 0

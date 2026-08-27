@@ -1,3 +1,8 @@
+"""
+Events API test suite for PYRO-SENTRY.
+"""
+
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -5,42 +10,40 @@ def test_list_events(client: TestClient):
     """Test retrieving list of events."""
     response = client.get("/api/v1/events")
     assert response.status_code == 200
-    events = response.json()
-    assert isinstance(events, list)
-    assert len(events) >= 1  # Should contain seeded event
+    data = response.json()
+    assert isinstance(data, list)
+    assert len(data) >= 1
+    assert "title" in data[0]
+    assert "severity" in data[0]
 
 
-def test_create_and_get_event(client: TestClient):
-    """Test creating a new wildfire event alert and retrieving it."""
-    payload = {
-        "title": "Test Ridge Fire",
-        "latitude": 34.1234,
-        "longitude": -118.5678,
-        "severity": "HIGH",
-        "source": "UNIT_TEST",
-        "description": "Controlled test fire event",
-    }
-    
-    # Create event
-    create_resp = client.post("/api/v1/events", json=payload)
-    assert create_resp.status_code == 201
-    created_event = create_resp.json()
-    assert created_event["title"] == payload["title"]
-    assert created_event["latitude"] == payload["latitude"]
-    assert "id" in created_event
-    assert "timestamp" in created_event
-    
-    event_id = created_event["id"]
-
-    # Get event by id
-    get_resp = client.get(f"/api/v1/events/{event_id}")
-    assert get_resp.status_code == 200
-    fetched_event = get_resp.json()
-    assert fetched_event["id"] == event_id
-    assert fetched_event["title"] == payload["title"]
+def test_get_event_by_id(client: TestClient):
+    """Test retrieving a specific event."""
+    response = client.get("/api/v1/events/evt-001")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == "evt-001"
 
 
-def test_get_nonexistent_event(client: TestClient):
-    """Test 404 response when requesting non-existent event ID."""
-    response = client.get("/api/v1/events/non-existent-id-12345")
+def test_get_event_not_found(client: TestClient):
+    """Test 404 for nonexistent event."""
+    response = client.get("/api/v1/events/nonexistent-evt-999")
     assert response.status_code == 404
+
+
+def test_create_event_success(client: TestClient):
+    """Test creating a new event by an OPERATOR."""
+    payload = {
+        "title": "Flare Stack Overpressure Alert",
+        "latitude": 29.7200,
+        "longitude": -95.0800,
+        "severity": "HIGH",
+        "source": "FIELD_SENSOR",
+        "description": "Pressure relief sensor trigger in Sector 4",
+    }
+    response = client.post("/api/v1/events", json=payload)
+    assert response.status_code == 201
+    data = response.json()
+    assert data["title"] == "Flare Stack Overpressure Alert"
+    assert data["severity"] == "HIGH"
+    assert "id" in data

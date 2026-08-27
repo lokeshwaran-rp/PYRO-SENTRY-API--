@@ -1,203 +1,172 @@
-# PYRO-SENTRY — Backend Services & Realtime Engine (Lokesh's Module)
+# PYRO-SENTRY — Industrial Thermal Surveillance API & Realtime Gateway
 
-This repository contains the backend implementation for **Lokesh's Role** in the **PYRO-SENTRY** wildfire surveillance platform.
-
----
-
-## 1. Project Purpose
-
-The purpose of this module is to serve as the **central API and communication hub** for PYRO-SENTRY:
-- Provide **modular REST APIs** for querying thermal hotspots, wildfire targets, threat escalations, GIS layers, satellite evidence, system status, and dashboard analytics.
-- Provide a **Realtime WebSocket engine (`/ws`)** to stream live event envelopes (e.g. newly detected hotspots, threat updates, and simulation steps) to frontend clients.
-- Provide a **Simulation Engine (`/api/v1/simulation`)** for running isolated, non-destructive fire spread and classification calculations.
-- Operate in a **self-contained environment** using in-memory mock datasets without requiring external databases.
+Production-ready backend API service and realtime communication hub for the **PYRO-SENTRY Industrial Thermal Surveillance Platform**.
 
 ---
 
-## 2. REST APIs
+## 1. Architecture Overview
 
-All REST endpoints are grouped logically under `/api/v1` and return standard JSON payloads.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            FASTAPI APPLICATION                             │
+│                                                                             │
+│  ┌──────────────┐   ┌────────────────────────┐   ┌───────────────────────┐  │
+│  │ /auth/*      │   │ /api/v1/*              │   │ /ws (/ws/realtime)    │  │
+│  │ JWT + RBAC   │   │ Surveillance & Threats │   │ WebSocket Broadcast   │  │
+│  └──────┬───────┘   └───────────┬────────────┘   └───────────▲───────────┘  │
+└─────────┼───────────────────────┼────────────────────────────┼──────────────┘
+          │                       │                            │
+          ▼                       ▼                            │
+┌──────────────────┐    ┌──────────────────┐         ┌─────────┴──────────┐
+│  PostgreSQL +    │    │ Intelligence     │         │ Redis Pub/Sub      │
+│  SQLAlchemy ORM  │    │ Engine           │         │ Channel Broker     │
+│  (Real DB Layer) │    │ Classifier/Risk  │         │ (Multi-Instance)   │
+└──────────────────┘    └──────────────────┘         └────────────────────┘
+```
 
-| Category | Method | Endpoint | Description |
+- **Database Layer**: Full async SQLAlchemy 2.0 ORM with PostgreSQL + asyncpg (and in-memory SQLite support for automated tests).
+- **Authentication & RBAC**: JWT access tokens (short-lived) + refresh tokens (stored as SHA-256 hashes in `refresh_tokens` table) with bcrypt password hashing and security audit logging.
+- **Threat Lifecycle Engine**: PRD-enforced state machine graph (`NEW` → `ACKNOWLEDGED` → `INVESTIGATING` → `DISPATCHED` → `RESOLVED` + `FALSE_POSITIVE`).
+- **Intelligence Engine**: Single source of truth for classifier & composite risk scoring (`app/intelligence/classifier.py` and `app/intelligence/risk.py`).
+- **Realtime Gateway**: Redis Pub/Sub backend with WebSocket fan-out supporting multiple concurrent API instances.
+
+---
+
+## 2. API Endpoints & Backing Data Sources
+
+### Authentication (`/auth`)
+| Method | Endpoint | Description | Auth / RBAC |
 |---|---|---|---|
-| **Health** | `GET` | `/api/v1/health` | Service health status, UTC timestamp, active WebSocket count |
-| **Hotspots** | `GET` | `/api/v1/hotspots` | List active thermal hotspots (supports `min_frp`, `min_confidence`, `limit`) |
-| **Targets** | `GET` | `/api/v1/targets` | List wildfire target clusters (supports `status`, `threat_level`) |
-| | `GET` | `/api/v1/targets/{id}` | Target metadata and summary |
-| | `GET` | `/api/v1/targets/{id}/observations` | Sensor observation passes |
-| | `GET` | `/api/v1/targets/{id}/history` | Lifecycle audit trail and history logs |
-| | `GET` | `/api/v1/targets/{id}/classification` | Model classification probabilities |
-| | `GET` | `/api/v1/targets/{id}/risk` | Composite risk score and threatened assets |
-| | `GET` | `/api/v1/targets/{id}/evidence` | Multi-source sensor & environmental evidence |
-| | `GET` | `/api/v1/targets/{id}/satellite` | Satellite pass info and imagery URLs |
-| **Threats** | `GET` | `/api/v1/threats` | List active and historical threats |
-| | `GET` | `/api/v1/threats/{id}` | Specific threat details |
-| | `PATCH`| `/api/v1/threats/{id}` | Update threat severity, status, or operator notes |
-| | `POST` | `/api/v1/threats/{id}/acknowledge`| Acknowledge an active threat |
-| | `POST` | `/api/v1/threats/{id}/resolve` | Mark a threat as resolved |
-| **Analytics** | `GET` | `/api/v1/analytics/summary` | High-level dashboard counters |
-| | `GET` | `/api/v1/analytics/frp-trends` | Fire Radiative Power (MW) time-series trends |
-| | `GET` | `/api/v1/analytics/classification-distribution` | Class breakdown (Wildfire, Prescribed, Flare, etc.) |
-| | `GET` | `/api/v1/analytics/hourly-activity` | 24-hour diurnal detection frequency |
-| **GIS Layers** | `GET` | `/api/v1/gis/hotspots` | GeoJSON FeatureCollection of hotspots |
-| | `GET` | `/api/v1/gis/targets` | GeoJSON FeatureCollection of targets |
-| | `GET` | `/api/v1/gis/industrial-assets` | GeoJSON FeatureCollection of critical infrastructure |
-| | `GET` | `/api/v1/gis/clusters` | GeoJSON FeatureCollection of fire cluster polygons |
-| | `GET` | `/api/v1/gis/risk-zones` | GeoJSON FeatureCollection of calculated threat buffer zones |
-| **Satellite** | `GET` | `/api/v1/satellite/evidence/{target_id}`| High-resolution SWIR anomaly analysis |
-| **Search** | `GET` | `/api/v1/search?q={query}` | Search across targets, threats, and assets |
-| **System** | `GET` | `/api/v1/system/data-sources` | External satellite & weather ingestion feed status |
-| | `GET` | `/api/v1/system/status` | System runtime telemetry, memory, and CPU metrics |
-| **Events** | `GET` | `/api/v1/events` | List recently recorded wildfire alerts |
-| | `POST` | `/api/v1/events` | Ingest and broadcast a new wildfire alert |
+| `POST` | `/auth/register` | Register new user account | Public |
+| `POST` | `/auth/login` | Authenticate with email/password and obtain JWT pair | Public |
+| `POST` | `/auth/refresh` | Exchange valid refresh token for fresh access token | Public |
+| `GET` | `/auth/me` | Retrieve profile of authenticated user | Any Authenticated |
+| `POST` | `/auth/logout` | Revoke active refresh token | Any Authenticated |
+
+### Surveillance & Telemetry (`/api/v1`)
+| Category | Method | Endpoint | Real Data Source / Logic | Auth / RBAC |
+|---|---|---|---|---|
+| **Health** | `GET` | `/api/v1/health` | Realtime connection counter & service status | Public |
+| **Hotspots** | `GET` | `/api/v1/hotspots` | DB Query: `hotspots` table (filtered by FRP/confidence) | Authenticated |
+| **Targets** | `GET` | `/api/v1/targets` | DB Query: `targets` table with embedded sub-resources | Authenticated |
+| | `GET` | `/api/v1/targets/{id}` | DB Query: Target details + all 1-to-N / 1-to-1 relations | Authenticated |
+| | `GET` | `/api/v1/targets/{id}/observations` | DB Query: `observations` table | Authenticated |
+| | `GET` | `/api/v1/targets/{id}/history` | DB Query: `target_history` lifecycle audit logs | Authenticated |
+| | `GET` | `/api/v1/targets/{id}/classification`| DB Query: `classifications` model evaluation | Authenticated |
+| | `GET` | `/api/v1/targets/{id}/risk` | DB Query: `risk_assessments` composite risk | Authenticated |
+| | `GET` | `/api/v1/targets/{id}/evidence` | DB Query: `evidence` multi-source items | Authenticated |
+| | `GET` | `/api/v1/targets/{id}/satellite` | DB Query: `satellite_passes` high-resolution imagery | Authenticated |
+| **Threats** | `GET` | `/api/v1/threats` | DB Query: `threats` table (filtered by status/severity) | Authenticated |
+| | `GET` | `/api/v1/threats/{id}` | DB Query: Specific threat by ID | Authenticated |
+| | `PATCH`| `/api/v1/threats/{id}` | DB Update + State Machine validation | `OPERATOR`, `ADMIN` |
+| | `POST` | `/api/v1/threats/{id}/acknowledge`| Transition state `NEW` → `ACKNOWLEDGED` | `OPERATOR`, `ADMIN` |
+| | `POST` | `/api/v1/threats/{id}/resolve` | Transition state `DISPATCHED` → `RESOLVED` | `OPERATOR`, `ADMIN` |
+| **Analytics**| `GET` | `/api/v1/analytics/summary` | DB Aggregation (`COUNT`, `AVG`, `SUM`, `MAX`) | Authenticated |
+| | `GET` | `/api/v1/analytics/frp-trends` | DB Time-series grouping by hour | Authenticated |
+| | `GET` | `/api/v1/analytics/classification-distribution`| DB Group-by `primary_class` | Authenticated |
+| | `GET` | `/api/v1/analytics/hourly-activity`| DB Diurnal 24h detection frequency | Authenticated |
+| **GIS** | `GET` | `/api/v1/gis/hotspots` | GeoJSON FeatureCollection generated from `hotspots` | Authenticated |
+| | `GET` | `/api/v1/gis/targets` | GeoJSON FeatureCollection generated from `targets` | Authenticated |
+| | `GET` | `/api/v1/gis/industrial-assets` | GeoJSON FeatureCollection from `industrial_assets` | Authenticated |
+| | `GET` | `/api/v1/gis/clusters` | GeoJSON polygon buffers from target clusters | Authenticated |
+| | `GET` | `/api/v1/gis/risk-zones` | GeoJSON polygon zones with evacuation flags | Authenticated |
+| **Satellite**| `GET` | `/api/v1/satellite/evidence/{target_id}` | DB Query: `satellite_passes` | Authenticated |
+| **Search** | `GET` | `/api/v1/search?q={query}` | DB Full-text search across targets, threats & assets | Authenticated |
+| **System** | `GET` | `/api/v1/system/data-sources` | DB Query: `data_sources` operational feed status | Authenticated |
+| | `GET` | `/api/v1/system/status` | Live OS/runtime process telemetry (`psutil`) | Authenticated |
+| **Events** | `GET` | `/api/v1/events` | DB Query: `events` alert log | Authenticated |
+| | `POST` | `/api/v1/events` | DB Insert + Redis Pub/Sub Broadcast | `OPERATOR`, `ADMIN` |
+| **Realtime** | `POST` | `/api/v1/realtime/publish` | Publish event envelope to Redis Pub/Sub channel | `OPERATOR`, `ADMIN` |
 
 ---
 
-## 3. Simulation API
+## 3. Threat Lifecycle State Machine
 
-### Stateless Simulation Calculation
-- **`POST /api/v1/simulation/run`**
-  - **Inputs**: `frp`, `brightness`, `persistence`, `industrial_proximity`, `wind_speed`, `wind_direction`, `ndvi`, `nbr`, `swir_anomaly`.
-  - **Outputs**: `classification`, `confidence`, `risk_score`, `risk_level`, `evidence`, `smoke_estimate`, `impact_estimate`, `is_simulated: true`, `status: "COMPLETED"`.
-  - **Guaranteed Isolation**: Stateless calculation that **never** modifies or mutates existing targets, observations, or threats.
+Server-side transition enforcement strictly prevents illegal state jumps (returns `409 Conflict` on invalid transitions):
 
-### Spatial Spread Simulation Orchestrator
-- **`POST /api/v1/simulation/start`**: Launch a background simulation loop generating spreading perimeter steps.
-- **`GET /api/v1/simulation/status`**: Check status and latest step of current simulation.
-- **`POST /api/v1/simulation/stop`**: Gracefully stop the active simulation.
-
----
-
-## 4. WebSocket (`/ws`)
-
-### Realtime Stream Endpoint
-- **URL**: `ws://localhost:8000/ws` (with `ws://localhost:8000/ws/realtime` supported as an alias)
-- In-memory multi-client connection manager supporting concurrent subscribers without Redis.
-
-### Supported Event Types
-1. `hotspot.created`
-2. `target.updated`
-3. `classification.completed`
-4. `risk.updated`
-5. `threat.created`
-6. `threat.updated`
-7. `simulation.completed`
-8. `system.status`
-
-### Event Envelope Format
-```json
-{
-  "event": "hotspot.created",
-  "timestamp": "2026-08-26T21:40:27.758547+00:00",
-  "data": {
-    "hotspot_id": "hs-101",
-    "latitude": 34.2439,
-    "longitude": -118.1753,
-    "frp": 124.5
-  }
-}
 ```
-
-### Demo / Test Event Trigger
-Trigger a live broadcast using the REST endpoint:
-```bash
-POST /api/v1/realtime/publish
-{
-  "event": "threat.created",
-  "data": {"threat_id": "threat-99", "severity": "CRITICAL"}
-}
+       ┌───────────────────────────────┐
+       │             NEW               │
+       └───────┬───────────────┬───────┘
+               │               │
+       ┌───────▼───────┐       │
+       │ ACKNOWLEDGED  │       │
+       └───────┬───────┴──────┐│
+               │              ││
+       ┌───────▼───────┐      ││
+       │ INVESTIGATING │      ││
+       └───────┬───────┴─────┐││
+               │             │││
+       ┌───────▼───────┐     │││
+       │  DISPATCHED   │     │││
+       └───────┬───────┘     │││
+               │             │││
+       ┌───────▼───────┐     │││
+       │   RESOLVED    │     ▼▼▼
+       └───────────────┘  ┌────────────────┐
+        (Terminal State)  │ FALSE_POSITIVE │
+                          └────────────────┘
+                           (Terminal State)
 ```
 
 ---
 
-## 5. How to Install
+## 4. Realtime Redis Pub/Sub Architecture
 
-### Prerequisites
-- Python 3.10+ installed.
+1. When any background worker, pipeline event, or REST endpoint publishes an event envelope, it calls `publisher.publish(event_type, data)`.
+2. The event is published to the Redis channel `pyrosentry:events`.
+3. Every running API instance runs an async subscriber task (`start_subscriber`) listening to `pyrosentry:events`.
+4. Upon receiving a Redis message, the subscriber fans out the envelope to all locally connected WebSocket clients on `/ws`.
+5. If Redis is unavailable in single-instance local development, the publisher gracefully falls back to in-process broadcast.
 
-### Setup Steps
+---
+
+## 5. Running the Application
+
+### Environment Setup
+Create a `.env` file based on `.env.example`:
 ```bash
-# 1. Clone repository and navigate to workspace
-cd "New folder (2)"
+# Database
+DATABASE_URL=postgresql+asyncpg://pyro:pyro@localhost:5432/pyrosentry
 
-# 2. (Optional) Create and activate virtual environment
-python -m venv venv
-# On Windows:
-.\venv\Scripts\activate
-# On Linux/macOS:
-source venv/bin/activate
+# Redis
+REDIS_URL=redis://localhost:6379/0
+REDIS_CHANNEL=pyrosentry:events
 
-# 3. Install dependencies
+# JWT Security
+PYRO_JWT_SECRET=your-secure-secret-key-min-32-chars
+PYRO_JWT_ALGORITHM=HS256
+PYRO_JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
+PYRO_JWT_REFRESH_TOKEN_EXPIRE_DAYS=7
+```
+
+### Install Dependencies
+```bash
 pip install -r requirements.txt
 ```
 
----
-
-## 6. How to Run
-
-Start the FastAPI application with Uvicorn:
-
+### Run Migrations
 ```bash
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+alembic upgrade head
 ```
 
-The application will be accessible at:
-- **Base URL**: `http://127.0.0.1:8000`
-- **Health Endpoint**: `http://127.0.0.1:8000/api/v1/health`
+### Start Application
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
 
 ---
 
-## 7. Swagger Documentation
+## 6. Running Automated Tests
 
-Interactive OpenAPI documentation is automatically available when the app is running:
-- **Interactive Swagger UI**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-- **ReDoc UI**: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
-- **OpenAPI JSON**: [http://127.0.0.1:8000/openapi.json](http://127.0.0.1:8000/openapi.json)
-
----
-
-## 8. How to Run Tests
-
-Run the full automated test suite using `pytest`:
-
+Run the complete test suite:
 ```bash
 python -m pytest -v
 ```
 
-The test suite contains **53 automated tests** covering:
-- Every REST endpoint & subresource
-- Stateless and spatial simulation runs
-- WebSocket connection, disconnection, echo, and multi-client broadcast
-- Pydantic input validation & 422 error rejection
-- 404 error handling for non-existent entities
-- Simulation isolation (ensuring existing records remain 100% immutable)
-
----
-
-## 9. How to Run Docker
-
-### Using Docker Compose (Recommended)
-```bash
-# Build and start the container in detached mode
-docker compose up -d --build
-
-# View container logs
-docker compose logs -f
-
-# Stop the container
-docker compose down
-```
-
-### Using Plain Docker Commands
-```bash
-# Build Docker image
-docker build -t pyro-sentry-api:latest .
-
-# Run container mapping port 8000
-docker run -d --name pyro-sentry-api -p 8000:8000 pyro-sentry-api:latest
-```
-
-Once running in Docker:
-- **API URL**: `http://localhost:8000`
-- **Swagger Docs**: `http://localhost:8000/docs`
-- **WebSocket URL**: `ws://localhost:8000/ws`
+The test suite runs with **70 tests (100% passing)** against real DB-backed behavior (in-memory SQLite with seed data), testing:
+- **Authentication & RBAC**: Register, login, refresh, profile, logout token revocation, audit logging, role enforcement.
+- **Threat Lifecycle**: Valid progression workflows, false positive branching, and 409 rejection of invalid skips.
+- **Simulation Parity**: Verifies that `/simulation/run` outputs 100% match direct `classifier.classify()` and `risk.compute_risk()` calculations.
+- **Redis Pub/Sub**: Cross-instance multi-server delivery and in-process fallback.
+- **Surveillance REST APIs**: Hotspots, targets, observations, history, GIS GeoJSON, satellite evidence, analytics aggregations, search, system metrics, and WebSocket endpoints.

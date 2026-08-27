@@ -1,7 +1,9 @@
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from .connection_manager import manager
+from .redis_pubsub import publish_to_redis, is_redis_available
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +22,10 @@ SUPPORTED_EVENT_TYPES = {
 
 class EventPublisher:
     """
-    In-memory Event Publisher for PYRO-SENTRY realtime streams.
-    Formats standardized JSON event envelopes and broadcasts to all /ws clients.
+    Event Publisher for PYRO-SENTRY realtime streams.
+
+    When Redis is available, publishes to Redis channel (for cross-instance delivery).
+    When Redis is unavailable, falls back to direct in-process broadcast.
     """
 
     def __init__(self, connection_manager=manager):
@@ -29,14 +33,10 @@ class EventPublisher:
 
     async def publish(self, event_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Publish a standardized event envelope to all connected WebSocket clients.
-        
-        Envelope structure:
-        {
-            "event": "hotspot.created",
-            "timestamp": "2026-08-26T21:50:00Z",
-            "data": { ... }
-        }
+        Publish a standardized event envelope.
+
+        If Redis is connected: publishes to Redis channel → subscriber picks up → broadcasts to local WS clients.
+        If Redis is NOT connected: falls back to direct in-process broadcast.
         """
         envelope = {
             "event": event_type,
@@ -44,11 +44,19 @@ class EventPublisher:
             "data": data,
         }
 
-        await self.manager.broadcast_json(envelope)
-        logger.info(f"Published event '{event_type}' to {self.manager.connection_count} clients.")
+        # Try Redis first (for cross-instance delivery)
+        published_to_redis = await publish_to_redis(settings.REDIS_CHANNEL, envelope)
+
+        if not published_to_redis:
+            # Fallback: direct in-process broadcast
+            await self.manager.broadcast_json(envelope)
+            logger.info(f"Published event '{event_type}' via in-process broadcast to {self.manager.connection_count} clients.")
+        else:
+            logger.info(f"Published event '{event_type}' via Redis channel '{settings.REDIS_CHANNEL}'.")
+
         return envelope
 
-    # --- Convenience Helper Methods for all 8 supported event types ---
+    # --- Convenience Helper Methods ---
 
     async def publish_hotspot_created(self, hotspot_data: Dict[str, Any]) -> Dict[str, Any]:
         """Publish hotspot.created event."""

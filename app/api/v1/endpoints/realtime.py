@@ -1,7 +1,8 @@
 from typing import Dict, Any
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Depends, status
 from pydantic import BaseModel, Field
 from app.realtime.publisher import publisher, SUPPORTED_EVENT_TYPES
+from app.auth.security import require_role
 
 router = APIRouter(prefix="/realtime", tags=["Realtime WebSocket & Publisher"])
 
@@ -37,9 +38,13 @@ class PublishEventResponse(BaseModel):
 
 
 @router.post("/publish", response_model=PublishEventResponse, summary="Publish Event to /ws Subscribers")
-async def publish_demo_event(req: PublishEventRequest):
+async def publish_demo_event(
+    req: PublishEventRequest,
+    _current_user=Depends(require_role("ADMIN", "OPERATOR")),
+):
     """
     Demo / testing endpoint for publishing an event to all connected WebSocket clients on `/ws`.
+    Requires ADMIN or OPERATOR role.
     
     **Supported Event Types:**
     - `hotspot.created`
